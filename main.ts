@@ -1,134 +1,166 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import { Plugin, TAbstractFile, TFile, TFolder, Notice } from 'obsidian';
 
-// Remember to rename these classes and interfaces!
+export default class BookmarkGeneratorPlugin extends Plugin {
+    // Check if the item is a hidden file or directory
+    private isHidden(item: TAbstractFile): boolean {
+        return item.name.startsWith('.');
+    }
 
-interface MyPluginSettings {
-	mySetting: string;
-}
+    // Check if the item is an assets directory
+    private isAssetsDirectory(item: TFolder): boolean {
+        return item.name === 'assets' || item.name.endsWith('_assets');
+    }
 
-const DEFAULT_SETTINGS: MyPluginSettings = {
-	mySetting: 'default'
-}
+    // Get the creation time of a file or directory
+    private async getCreationTime(item: TFile | TFolder): Promise<number> {
+        try {
+            const stat = await this.app.vault.adapter.stat(item.path);
+            return stat?.ctime ? stat.ctime * 1000 : 0;
+        } catch (err) {
+            console.warn(`Failed to get creation time for ${item.path}, using 0 instead`);
+            return 0;
+        }
+    }
 
-export default class MyPlugin extends Plugin {
-	settings: MyPluginSettings;
+    // Process a folder and generate bookmark nodes
+    private async processFolder(folder: TFolder, filterAssets: boolean): Promise<any> {
+        const title = folder.name;
+        const ctime = await this.getCreationTime(folder);
+        const items: any[] = [];
 
-	async onload() {
-		await this.loadSettings();
+        const children = folder.children.filter(child => {
+            if (this.isHidden(child)) return false;
+            if (filterAssets && child instanceof TFolder && this.isAssetsDirectory(child)) return false;
+            return true;
+        });
 
-		// This creates an icon in the left ribbon.
-		const ribbonIconEl = this.addRibbonIcon('dice', 'Sample Plugin', (evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
-		});
-		// Perform additional things with the ribbon
-		ribbonIconEl.addClass('my-plugin-ribbon-class');
+        children.sort((a, b) => a.name.localeCompare(b.name));
 
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status Bar Text');
+        for (const child of children) {
+            if (child instanceof TFolder) {
+                items.push(await this.processFolder(child, filterAssets));
+            } else if (child instanceof TFile && child.extension === 'md') {
+                items.push({
+                    type: 'file',
+                    ctime: await this.getCreationTime(child),
+                    path: child.path,
+                });
+            }
+        }
 
-		// This adds a simple command that can be triggered anywhere
-		this.addCommand({
-			id: 'open-sample-modal-simple',
-			name: 'Open sample modal (simple)',
-			callback: () => {
-				new SampleModal(this.app).open();
-			}
-		});
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: 'sample-editor-command',
-			name: 'Sample editor command',
-			editorCallback: (editor: Editor, view: MarkdownView) => {
-				console.log(editor.getSelection());
-				editor.replaceSelection('Sample Editor Command');
-			}
-		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		this.addCommand({
-			id: 'open-sample-modal-complex',
-			name: 'Open sample modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
-					}
+        return {
+            type: 'group',
+            ctime: ctime,
+            title: title,
+            path: folder.path,
+            items: items,
+        };
+    }
 
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
-				}
-			}
-		});
+    // Generate the bookmark file
+    private async generateBookmark() {
+        const vault = this.app.vault;
+        const filterAssets = true;
+        const bookmark: any = { items: [] };
 
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
+        const rootFolder = vault.getRoot();
+        const children = rootFolder.children.filter(child => {
+            if (this.isHidden(child)) return false;
+            if (filterAssets && child instanceof TFolder && this.isAssetsDirectory(child)) return false;
+            return true;
+        });
 
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			console.log('click', evt);
-		});
+        children.sort((a, b) => a.name.localeCompare(b.name));
 
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
-	}
+        for (const child of children) {
+            if (child instanceof TFolder) {
+                bookmark.items.push(await this.processFolder(child, filterAssets));
+            } else if (child instanceof TFile && child.extension === 'md') {
+                bookmark.items.push({
+                    type: 'file',
+                    ctime: await this.getCreationTime(child),
+                    path: child.path,
+                });
+            }
+        }
 
-	onunload() {
+        const fileName = 'bookmarks.json';
+        const obsidianFolder = '.obsidian';
+        const filePath = `${obsidianFolder}/${fileName}`;
+        let finalBookmark = bookmark;
 
-	}
+        try {
+            const exists = await vault.adapter.exists(filePath);
+            if (exists) {
+                const oldContent = await vault.adapter.read(filePath);
+                const oldBookmark = JSON.parse(oldContent);
+                finalBookmark.items = this.mergeItemLists(oldBookmark.items || [], bookmark.items);
+            }
+        } catch (err) {
+            console.error('Failed to read or parse old bookmarks.json, using newly generated structure', err);
+        }
 
-	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
-	}
+        const jsonContent = JSON.stringify(finalBookmark, null, 2);
 
-	async saveSettings() {
-		await this.saveData(this.settings);
-	}
-}
+        try {
+            await vault.adapter.write(filePath, jsonContent);
+            new Notice(`Bookmark file generated: ${filePath}`);
+        } catch (err) {
+            console.error(err);
+            new Notice(`Failed to generate bookmark file: ${err}`);
+        }
+    }
 
-class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
-	}
+    // Merge bookmark item lists, preserving original order
+    private mergeItemLists(oldItems: any[], newItems: any[]): any[] {
+        const result: any[] = [];
+        const newMap = new Map<string, any>();
 
-	onOpen() {
-		const {contentEl} = this;
-		contentEl.setText('Woah!');
-	}
+        const getKey = (item: any) => {
+            return (item.type === 'file' ? 'file:' : 'group:') + item.path;
+        };
 
-	onClose() {
-		const {contentEl} = this;
-		contentEl.empty();
-	}
-}
+        newItems.forEach(item => {
+            newMap.set(getKey(item), item);
+        });
 
-class SampleSettingTab extends PluginSettingTab {
-	plugin: MyPlugin;
+        const processedKeys = new Set<string>();
 
-	constructor(app: App, plugin: MyPlugin) {
-		super(app, plugin);
-		this.plugin = plugin;
-	}
+        for (const oldItem of oldItems) {
+            const key = getKey(oldItem);
+            if (newMap.has(key)) {
+                const newItem = newMap.get(key);
+                if (oldItem.type === 'group' && newItem.type === 'group') {
+                    newItem.items = this.mergeItemLists(oldItem.items || [], newItem.items || []);
+                }
+                result.push(newItem);
+                processedKeys.add(key);
+            }
+        }
 
-	display(): void {
-		const {containerEl} = this;
+        for (const newItem of newItems) {
+            const key = getKey(newItem);
+            if (!processedKeys.has(key)) {
+                result.push(newItem);
+            }
+        }
 
-		containerEl.empty();
+        return result;
+    }
 
-		new Setting(containerEl)
-			.setName('Setting #1')
-			.setDesc('It\'s a secret')
-			.addText(text => text
-				.setPlaceholder('Enter your secret')
-				.setValue(this.plugin.settings.mySetting)
-				.onChange(async (value) => {
-					this.plugin.settings.mySetting = value;
-					await this.plugin.saveSettings();
-				}));
-	}
+    // Initialization when the plugin is loaded
+    onload() {
+        this.addCommand({
+            id: 'generate-bookmark',
+            name: 'Generate Bookmark File',
+            callback: () => this.generateBookmark(),
+        });
+
+        this.addRibbonIcon('bookmark-plus', 'Generate Bookmark File', () => this.generateBookmark());
+    }
+
+    // Cleanup when the plugin is unloaded
+    onunload() {
+        // Cleanup when the plugin is unloaded
+    }
 }
