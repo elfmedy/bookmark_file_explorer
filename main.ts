@@ -1,14 +1,16 @@
-import { Plugin, TAbstractFile, TFile, TFolder, Notice } from 'obsidian';
+import { Plugin, TAbstractFile, TFile, TFolder, Notice, PluginSettingTab, App, Setting } from 'obsidian';
 
 export default class BookmarkGeneratorPlugin extends Plugin {
+    //private lang: any;
+
     // Check if the item is a hidden file or directory
     private isHidden(item: TAbstractFile): boolean {
         return item.name.startsWith('.');
     }
 
-    // Check if the item is an assets directory
-    private isAssetsDirectory(item: TFolder): boolean {
-        return item.name === 'assets' || item.name.endsWith('_assets');
+    // Check if the file is a markdown file
+    private isMarkdownFile(file: TFile): boolean {
+        return file.extension === 'md';
     }
 
     // Get the creation time of a file or directory
@@ -23,23 +25,22 @@ export default class BookmarkGeneratorPlugin extends Plugin {
     }
 
     // Process a folder and generate bookmark nodes
-    private async processFolder(folder: TFolder, filterAssets: boolean): Promise<any> {
+    private async processFolder(folder: TFolder): Promise<any | null> {
         const title = folder.name;
         const ctime = await this.getCreationTime(folder);
         const items: any[] = [];
 
         const children = folder.children.filter(child => {
-            if (this.isHidden(child)) return false;
-            if (filterAssets && child instanceof TFolder && this.isAssetsDirectory(child)) return false;
-            return true;
+            return !this.isHidden(child);
         });
 
         children.sort((a, b) => a.name.localeCompare(b.name));
 
         for (const child of children) {
             if (child instanceof TFolder) {
-                items.push(await this.processFolder(child, filterAssets));
-            } else if (child instanceof TFile && child.extension === 'md') {
+                const processedChild = await this.processFolder(child);
+                if (processedChild) items.push(processedChild);
+            } else if (child instanceof TFile && this.isMarkdownFile(child)) {
                 items.push({
                     type: 'file',
                     ctime: await this.getCreationTime(child),
@@ -47,7 +48,9 @@ export default class BookmarkGeneratorPlugin extends Plugin {
                 });
             }
         }
-
+        if (items.length === 0) {
+            return null;
+        }
         return {
             type: 'group',
             ctime: ctime,
@@ -58,24 +61,24 @@ export default class BookmarkGeneratorPlugin extends Plugin {
     }
 
     // Generate the bookmark file
-    private async generateBookmark() {
+    public async generateBookmark(merge: boolean) {
         const vault = this.app.vault;
-        const filterAssets = true;
         const bookmark: any = { items: [] };
 
         const rootFolder = vault.getRoot();
         const children = rootFolder.children.filter(child => {
-            if (this.isHidden(child)) return false;
-            if (filterAssets && child instanceof TFolder && this.isAssetsDirectory(child)) return false;
-            return true;
+            return !this.isHidden(child);
         });
 
         children.sort((a, b) => a.name.localeCompare(b.name));
 
         for (const child of children) {
             if (child instanceof TFolder) {
-                bookmark.items.push(await this.processFolder(child, filterAssets));
-            } else if (child instanceof TFile && child.extension === 'md') {
+                const processedFolder = await this.processFolder(child);
+                if (processedFolder) {
+                    bookmark.items.push(processedFolder);
+                }
+            } else if (child instanceof TFile && this.isMarkdownFile(child)) {
                 bookmark.items.push({
                     type: 'file',
                     ctime: await this.getCreationTime(child),
@@ -89,15 +92,17 @@ export default class BookmarkGeneratorPlugin extends Plugin {
         const filePath = `${obsidianFolder}/${fileName}`;
         let finalBookmark = bookmark;
 
-        try {
-            const exists = await vault.adapter.exists(filePath);
-            if (exists) {
-                const oldContent = await vault.adapter.read(filePath);
-                const oldBookmark = JSON.parse(oldContent);
-                finalBookmark.items = this.mergeItemLists(oldBookmark.items || [], bookmark.items);
+        if (merge) {
+            try {
+                const exists = await vault.adapter.exists(filePath);
+                if (exists) {
+                    const oldContent = await vault.adapter.read(filePath);
+                    const oldBookmark = JSON.parse(oldContent);
+                    finalBookmark.items = this.mergeItemLists(oldBookmark.items || [], bookmark.items);
+                }
+            } catch (err) {
+                console.error('Failed to read or parse old bookmarks.json, using newly generated structure', err);
             }
-        } catch (err) {
-            console.error('Failed to read or parse old bookmarks.json, using newly generated structure', err);
         }
 
         const jsonContent = JSON.stringify(finalBookmark, null, 2);
@@ -153,14 +158,41 @@ export default class BookmarkGeneratorPlugin extends Plugin {
         this.addCommand({
             id: 'generate-bookmark',
             name: 'Generate Bookmark File',
-            callback: () => this.generateBookmark(),
+            callback: () => this.generateBookmark(true),
         });
-
-        this.addRibbonIcon('bookmark-plus', 'Generate Bookmark File', () => this.generateBookmark());
+        this.addRibbonIcon('bookmark-check', 'Generate Bookmark File', () => this.generateBookmark(true));
+        this.addSettingTab(new BookmarkGeneratorSettingTab(this.app, this));
     }
 
     // Cleanup when the plugin is unloaded
     onunload() {
         // Cleanup when the plugin is unloaded
+    }
+}
+
+
+class BookmarkGeneratorSettingTab extends PluginSettingTab {
+    plugin: BookmarkGeneratorPlugin;
+
+    constructor(app: App, plugin: BookmarkGeneratorPlugin) {
+        super(app, plugin);
+        this.plugin = plugin;
+    }
+
+    display(): void {
+        const { containerEl } = this;
+
+        containerEl.empty();
+
+        new Setting(containerEl)
+            .setName("Regenerate Bookmark File")
+            .setDesc("Click the button to regenerate the bookmarks.json file without merging existing content.")
+            .addButton((button) =>
+                button
+                    .setButtonText("Regenerate")
+                    .onClick(async () => {
+                        await this.plugin.generateBookmark(false);
+                    })
+            );
     }
 }
